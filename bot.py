@@ -1,8 +1,8 @@
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
+import os
+import sqlite3
+from datetime import datetime
+from openpyxl import Workbook, load_workbook
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -11,41 +11,33 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
+from openai import OpenAI
+import PyPDF2
 
 from structure import MENU_STRUCTURE
 from content import CONTENT
 
-from openpyxl import Workbook, load_workbook
-from datetime import datetime
-import os
-import sqlite3
-from openai import OpenAI
+# ================== НАСТРОЙКИ ==================
 
 TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 
 EXCEL_FILE = "suggestions.xlsx"
 DB_FILE = "structai_ai.db"
+PDF_FOLDER = "pdf_db"
 
-# ============================================================
-# ========================== AI ===============================
-# ============================================================
+# ================== AI CLIENT ==================
 
 ai_client = OpenAI(
     api_key=OPENAI_KEY,
     base_url="https://openrouter.ai/api/v1"
 )
 
+# ================== ИНИЦИАЛИЗАЦИЯ БД ==================
+
 def init_ai_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            role TEXT
-        )
-    """)
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS history (
@@ -60,91 +52,60 @@ def init_ai_db():
     conn.commit()
     conn.close()
 
+# ================== PDF БАЗА ==================
 
-# ============================================================
-# ===================== ПОИСК ПО БАЗЕ ========================
-# ============================================================
+def search_in_pdfs(question):
 
-def search_similar_question(question):
+    if not os.path.exists(PDF_FOLDER):
+        return None
 
+    question = question.lower()
+
+    for file in os.listdir(PDF_FOLDER):
+        if file.endswith(".pdf"):
+            path = os.path.join(PDF_FOLDER, file)
+
+            with open(path, "rb") as f:
+                reader = PyPDF2.PdfReader(f)
+
+                for page in reader.pages:
+                    text = page.extract_text()
+                    if text and question[:30] in text.lower():
+                        return f"📚 Найдено в {file}:\n\n" + text[:1500]
+
+    return None
+
+# ================== AI ==================
+
+async def ask_ai(user_id, question):
+
+    # 1️⃣ Поиск в PDF
+    pdf_answer = search_in_pdfs(question)
+    if pdf_answer:
+        return pdf_answer
+
+    # 2️⃣ Поиск в истории
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-
-    c.execute("""
-        SELECT question, answer FROM history
-        WHERE question LIKE ?
-        ORDER BY id DESC
-        LIMIT 1
-    """, (f"%{question[:20]}%",))
-
+    c.execute("SELECT answer FROM history WHERE question LIKE ? LIMIT 1",
+              (f"%{question[:20]}%",))
     row = c.fetchone()
     conn.close()
 
     if row:
-        return row[1]
+        return "📚 Найдено в базе:\n\n" + row[0]
 
-    return None
-
-
-# ============================================================
-# ===================== РОЛИ ПОЛЬЗОВАТЕЛЯ ====================
-# ============================================================
-
-def save_user_role(user_id, role):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO users (user_id, role) VALUES (?, ?)", (user_id, role))
-    conn.commit()
-    conn.close()
-
-def get_user_role(user_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT role FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else "engineer"
-
-def build_system_prompt(role):
-
-    base = """
-Ты инженерный ассистент по Еврокодам EN 1990–1999,
-СП РК EN и национальным приложениям.
-
-Запрещено:
-- темы вне проектирования
-- выдуманные нормы
-
-Если вопрос вне нормативов:
-ответь: "Вопрос вне области нормативного проектирования."
-"""
-
-    if role == "student":
-        return base + "\nОбъясняй просто и пошагово."
-    elif role == "oldschool":
-        return base + "\nОтвечай технически и указывай отличия от старых СП."
-    return base + "\nОтвечай профессионально и технически."
-
-
-# ============================================================
-# ======================= ОСНОВНОЙ AI ========================
-# ============================================================
-
-async def ask_ai(user_id, question):
-
-    # 1️⃣ Сначала ищем в базе
-    cached_answer = search_similar_question(question)
-    if cached_answer:
-        return "📚 Найден ответ в базе:\n\n" + cached_answer
-
-    # 2️⃣ Если нет — обращаемся к AI
-    role = get_user_role(user_id)
-    system_prompt = build_system_prompt(role)
-
+    # 3️⃣ Запрос к AI
     response = ai_client.chat.completions.create(
         model="mistralai/mistral-7b-instruct",
         messages=[
-            {"role": "system", "content": system_prompt},
+            {
+                "role": "system",
+                "content": """Ты инженерный ассистент по Еврокодам EN 1990–1999.
+Используй нормативную базу.
+Не выдумывай пункты норм.
+Если вопрос вне проектирования — сообщи об этом."""
+            },
             {"role": "user", "content": question}
         ],
         temperature=0.2,
@@ -153,7 +114,7 @@ async def ask_ai(user_id, question):
 
     answer = response.choices[0].message.content
 
-    # 3️⃣ Сохраняем в базу
+    # Сохраняем
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute(
@@ -165,12 +126,10 @@ async def ask_ai(user_id, question):
 
     return answer
 
-
-# ============================================================
-# ===================== СОХРАНЕНИЕ В EXCEL ===================
-# ============================================================
+# ================== EXCEL ==================
 
 def save_to_excel(user, text):
+
     if not os.path.exists(EXCEL_FILE):
         wb = Workbook()
         ws = wb.active
@@ -190,12 +149,10 @@ def save_to_excel(user, text):
 
     wb.save(EXCEL_FILE)
 
-
-# ============================================================
-# ======================== ГЛАВНОЕ МЕНЮ ======================
-# ============================================================
+# ================== ГЛАВНОЕ МЕНЮ (ТВОЙ ТЕКСТ СОХРАНЕН) ==================
 
 async def show_start(update: Update, context: ContextTypes.DEFAULT_TYPE, edit=False):
+
     keyboard = [
         [InlineKeyboardButton("🎓 Студент", callback_data="user_student")],
         [InlineKeyboardButton("🏗 Практикующий инженер", callback_data="user_engineer")],
@@ -203,7 +160,18 @@ async def show_start(update: Update, context: ContextTypes.DEFAULT_TYPE, edit=Fa
         [InlineKeyboardButton("💬 Предложения", callback_data="suggestions")]
     ]
 
-    text = "Добро пожаловать в StructAI.\n\nПожалуйста, ответьте, кто Вы?"
+    text = (
+        "Добро пожаловать в StructAI.\n"
+        "Это учебный и справочный бот по Еврокодам (СП РК EN).\n\n"
+        "Здесь вы можете быстро найти разделы нормативов, формулы, "
+        "комбинации нагрузок и основные положения расчёта.\n\n"
+        "В дальнейшем планируется внедрение интеллектуального помощника, "
+        "который поможет ориентироваться в Еврокодах, находить нужные пункты, "
+        "разъяснять требования и подсказывать по вопросам расчёта и проектирования.\n\n"
+        "Цель бота — упростить изучение Еврокодов и сделать работу с ними "
+        "более удобной и понятной.\n\n"
+        "Пожалуйста, ответьте, кто Вы?"
+    )
 
     if edit:
         await update.callback_query.edit_message_text(
@@ -219,22 +187,13 @@ async def show_start(update: Update, context: ContextTypes.DEFAULT_TYPE, edit=Fa
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_start(update, context)
 
-
-# ============================================================
-# =========================== CALLBACK =======================
-# ============================================================
+# ================== CALLBACK ==================
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
     await query.answer()
     data = query.data
-
-    if data == "user_student":
-        save_user_role(query.from_user.id, "student")
-    elif data == "user_engineer":
-        save_user_role(query.from_user.id, "engineer")
-    elif data == "user_oldschool":
-        save_user_role(query.from_user.id, "oldschool")
 
     if data == "suggestions":
         context.user_data["suggest_mode"] = True
@@ -243,7 +202,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("user_"):
         keyboard = [
-            [InlineKeyboardButton("🤖 Задать вопрос", callback_data="mode_question")],
+            [InlineKeyboardButton("📘 Изучать нормы поэтапно", callback_data="mode_study")],
+            [InlineKeyboardButton("🤖 Задать вопрос по Еврокодам", callback_data="mode_question")],
+            [InlineKeyboardButton("⬅ Назад", callback_data="back_start")],
             [InlineKeyboardButton("🏠 В главное меню", callback_data="back_start")]
         ]
         await query.edit_message_text(
@@ -253,15 +214,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "mode_question":
         context.user_data["ai_mode"] = True
-        await query.edit_message_text("Напишите ваш вопрос по Еврокодам:")
+        await query.edit_message_text(
+            "Напишите ваш вопрос по Еврокодам:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅ Назад", callback_data="back_start")]
+            ])
+        )
 
     elif data == "back_start":
+        context.user_data.clear()
         await show_start(update, context, edit=True)
 
-
-# ============================================================
-# ======================= ОБРАБОТКА ТЕКСТА ===================
-# ============================================================
+# ================== ОБРАБОТКА ТЕКСТА ==================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -277,10 +241,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(answer)
         return
 
-
-# ============================================================
-# ============================ MAIN ==========================
-# ============================================================
+# ================== MAIN ==================
 
 def main():
     init_ai_db()
@@ -290,7 +251,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("StructAI запущен")
+    print("StructAI PRO запущен")
     app.run_polling()
 
 if __name__ == "__main__":
