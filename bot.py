@@ -146,10 +146,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "mode_question":
     context.user_data["ai_mode"] = True
+    
     keyboard = [
         [InlineKeyboardButton("⬅ Назад", callback_data="user_student")],
         [InlineKeyboardButton("🏠 В главное меню", callback_data="back_start")]
     ]
+    
         await query.edit_message_text(
         "Напишите ваш вопрос по Еврокодам:",
         reply_markup=InlineKeyboardMarkup(keyboard)
