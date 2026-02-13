@@ -12,6 +12,7 @@ from telegram.ext import (
     ContextTypes
 )
 from openai import OpenAI
+
 try:
     import PyPDF2
 except ImportError:
@@ -85,23 +86,22 @@ def search_in_pdfs(question):
 
 async def ask_ai(user_id, question):
 
-    # 1️⃣ Поиск в PDF
     pdf_answer = search_in_pdfs(question)
     if pdf_answer:
         return pdf_answer
 
-    # 2️⃣ Поиск в истории
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT answer FROM history WHERE question LIKE ? LIMIT 1",
-              (f"%{question[:20]}%",))
+    c.execute(
+        "SELECT answer FROM history WHERE question LIKE ? LIMIT 1",
+        (f"%{question[:20]}%",)
+    )
     row = c.fetchone()
     conn.close()
 
     if row:
         return "📚 Найдено в базе:\n\n" + row[0]
 
-    # 3️⃣ Запрос к AI
     response = ai_client.chat.completions.create(
         model="mistralai/mistral-7b-instruct",
         messages=[
@@ -120,7 +120,6 @@ async def ask_ai(user_id, question):
 
     answer = response.choices[0].message.content
 
-    # Сохраняем
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute(
@@ -155,7 +154,7 @@ def save_to_excel(user, text):
 
     wb.save(EXCEL_FILE)
 
-# ================== ГЛАВНОЕ МЕНЮ (ТВОЙ ТЕКСТ СОХРАНЕН) ==================
+# ================== ГЛАВНОЕ МЕНЮ ==================
 
 async def show_start(update: Update, context: ContextTypes.DEFAULT_TYPE, edit=False):
 
@@ -207,29 +206,65 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("user_"):
+
+        context.user_data["role"] = data
+
         keyboard = [
             [InlineKeyboardButton("📘 Изучать нормы поэтапно", callback_data="mode_study")],
             [InlineKeyboardButton("🤖 Задать вопрос по Еврокодам", callback_data="mode_question")],
             [InlineKeyboardButton("⬅ Назад", callback_data="back_start")],
             [InlineKeyboardButton("🏠 В главное меню", callback_data="back_start")]
         ]
+
         await query.edit_message_text(
             "Что Вы хотите?",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+        return
 
-    elif data == "mode_question":
+    if data == "mode_study":
+
+        keyboard = [
+            [InlineKeyboardButton("EN 1990 – Основы", callback_data="study_1990")],
+            [InlineKeyboardButton("EN 1991 – Нагрузки", callback_data="study_1991")],
+            [InlineKeyboardButton("⬅ Назад", callback_data="back_role")],
+            [InlineKeyboardButton("🏠 В главное меню", callback_data="back_start")]
+        ]
+
+        await query.edit_message_text(
+            "Выберите норматив для изучения:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    if data == "mode_question":
         context.user_data["ai_mode"] = True
         await query.edit_message_text(
             "Напишите ваш вопрос по Еврокодам:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅ Назад", callback_data="back_start")]
+                [InlineKeyboardButton("⬅ Назад", callback_data="back_role")],
+                [InlineKeyboardButton("🏠 В главное меню", callback_data="back_start")]
             ])
         )
+        return
 
-    elif data == "back_start":
+    if data == "back_role":
+        keyboard = [
+            [InlineKeyboardButton("📘 Изучать нормы поэтапно", callback_data="mode_study")],
+            [InlineKeyboardButton("🤖 Задать вопрос по Еврокодам", callback_data="mode_question")],
+            [InlineKeyboardButton("⬅ Назад", callback_data="back_start")]
+        ]
+
+        await query.edit_message_text(
+            "Что Вы хотите?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    if data == "back_start":
         context.user_data.clear()
         await show_start(update, context, edit=True)
+        return
 
 # ================== ОБРАБОТКА ТЕКСТА ==================
 
@@ -242,9 +277,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if context.user_data.get("ai_mode"):
-        await update.message.reply_text("Анализ нормативной базы...")
-        answer = await ask_ai(update.message.from_user.id, update.message.text)
-        await update.message.reply_text(answer)
+
+        msg = await update.message.reply_text("Анализ нормативной базы...")
+
+        answer = await ask_ai(
+            update.message.from_user.id,
+            update.message.text
+        )
+
+        await msg.edit_text(answer)
         return
 
 # ================== MAIN ==================
