@@ -12,7 +12,10 @@ from telegram.ext import (
     ContextTypes
 )
 from openai import OpenAI
-import PyPDF2
+try:
+    import PyPDF2
+except ImportError:
+    PyPDF2 = None
 
 from structure import MENU_STRUCTURE
 from content import CONTENT
@@ -55,6 +58,9 @@ def init_ai_db():
 # ================== PDF БАЗА ==================
 
 def search_in_pdfs(question):
+
+    if PyPDF2 is None:
+        return None
 
     if not os.path.exists(PDF_FOLDER):
         return None

@@ -3,4 +3,5 @@ openai>=1.0.0
 faiss-cpu
 numpy
 openpyxl
+PyPDF2
 python-dotenv
