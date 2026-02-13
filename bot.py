@@ -185,6 +185,39 @@ async def show_start(update: Update, context: ContextTypes.DEFAULT_TYPE, edit=Fa
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_start(update, context)
 
+    # ======== УЧЕБНЫЙ МОДУЛЬ ========
+
+    if data == "study_1990":
+
+        text = CONTENT.get("EN1990", "Материал EN 1990 пока не добавлен.")
+
+        keyboard = [
+            [InlineKeyboardButton("⬅ Назад", callback_data="mode_study")],
+            [InlineKeyboardButton("🏠 В главное меню", callback_data="back_start")]
+        ]
+
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+
+    if data == "study_1991":
+
+        text = CONTENT.get("EN1991", "Материал EN 1991 пока не добавлен.")
+
+        keyboard = [
+            [InlineKeyboardButton("⬅ Назад", callback_data="mode_study")],
+            [InlineKeyboardButton("🏠 В главное меню", callback_data="back_start")]
+        ]
+
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
 # ================== CALLBACK ==================
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
