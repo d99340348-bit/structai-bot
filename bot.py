@@ -60,6 +60,36 @@ def init_ai_db():
     conn.commit()
     conn.close()
 
+
+# ============================================================
+# ===================== ПОИСК ПО БАЗЕ ========================
+# ============================================================
+
+def search_similar_question(question):
+
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    c.execute("""
+        SELECT question, answer FROM history
+        WHERE question LIKE ?
+        ORDER BY id DESC
+        LIMIT 1
+    """, (f"%{question[:20]}%",))
+
+    row = c.fetchone()
+    conn.close()
+
+    if row:
+        return row[1]
+
+    return None
+
+
+# ============================================================
+# ===================== РОЛИ ПОЛЬЗОВАТЕЛЯ ====================
+# ============================================================
+
 def save_user_role(user_id, role):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -95,8 +125,19 @@ def build_system_prompt(role):
         return base + "\nОтвечай технически и указывай отличия от старых СП."
     return base + "\nОтвечай профессионально и технически."
 
+
+# ============================================================
+# ======================= ОСНОВНОЙ AI ========================
+# ============================================================
+
 async def ask_ai(user_id, question):
 
+    # 1️⃣ Сначала ищем в базе
+    cached_answer = search_similar_question(question)
+    if cached_answer:
+        return "📚 Найден ответ в базе:\n\n" + cached_answer
+
+    # 2️⃣ Если нет — обращаемся к AI
     role = get_user_role(user_id)
     system_prompt = build_system_prompt(role)
 
@@ -112,6 +153,7 @@ async def ask_ai(user_id, question):
 
     answer = response.choices[0].message.content
 
+    # 3️⃣ Сохраняем в базу
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute(
@@ -122,6 +164,7 @@ async def ask_ai(user_id, question):
     conn.close()
 
     return answer
+
 
 # ============================================================
 # ===================== СОХРАНЕНИЕ В EXCEL ===================
@@ -147,6 +190,7 @@ def save_to_excel(user, text):
 
     wb.save(EXCEL_FILE)
 
+
 # ============================================================
 # ======================== ГЛАВНОЕ МЕНЮ ======================
 # ============================================================
@@ -159,18 +203,7 @@ async def show_start(update: Update, context: ContextTypes.DEFAULT_TYPE, edit=Fa
         [InlineKeyboardButton("💬 Предложения", callback_data="suggestions")]
     ]
 
-    text = (
-        "Добро пожаловать в StructAI.\n"
-        "Это учебный и справочный бот по Еврокодам (СП РК EN).\n\n"
-        "Здесь вы можете быстро найти разделы нормативов, формулы, "
-        "комбинации нагрузок и основные положения расчёта.\n\n"
-        "В дальнейшем планируется внедрение интеллектуального помощника, "
-        "который поможет ориентироваться в Еврокодах, находить нужные пункты, "
-        "разъяснять требования и подсказывать по вопросам расчёта и проектирования.\n\n"
-        "Цель бота — упростить изучение Еврокодов и сделать работу с ними "
-        "более удобной и понятной.\n\n"
-        "Пожалуйста, ответьте, кто Вы?"
-    )
+    text = "Добро пожаловать в StructAI.\n\nПожалуйста, ответьте, кто Вы?"
 
     if edit:
         await update.callback_query.edit_message_text(
@@ -186,6 +219,7 @@ async def show_start(update: Update, context: ContextTypes.DEFAULT_TYPE, edit=Fa
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_start(update, context)
 
+
 # ============================================================
 # =========================== CALLBACK =======================
 # ============================================================
@@ -195,7 +229,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    # ---- Сохраняем роль для AI ----
     if data == "user_student":
         save_user_role(query.from_user.id, "student")
     elif data == "user_engineer":
@@ -203,20 +236,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "user_oldschool":
         save_user_role(query.from_user.id, "oldschool")
 
-    # ---------------- ПРЕДЛОЖЕНИЯ ----------------
     if data == "suggestions":
         context.user_data["suggest_mode"] = True
-        await query.edit_message_text(
-            "Напишите ваше предложение по улучшению StructAI:"
-        )
+        await query.edit_message_text("Напишите ваше предложение:")
         return
 
-    # ---------------- РОЛЬ ----------------
     if data.startswith("user_"):
         keyboard = [
-            [InlineKeyboardButton("📘 Изучать нормы поэтапно", callback_data="mode_study")],
-            [InlineKeyboardButton("🤖 Задать вопрос по Еврокодам", callback_data="mode_question")],
-            [InlineKeyboardButton("⬅ Назад", callback_data="back_start")],
+            [InlineKeyboardButton("🤖 Задать вопрос", callback_data="mode_question")],
             [InlineKeyboardButton("🏠 В главное меню", callback_data="back_start")]
         ]
         await query.edit_message_text(
@@ -226,12 +253,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "mode_question":
         context.user_data["ai_mode"] = True
-        await query.edit_message_text(
-            "Напишите ваш вопрос по Еврокодам:"
-        )
+        await query.edit_message_text("Напишите ваш вопрос по Еврокодам:")
 
-    # ---- остальной код меню НЕ изменён ----
-    # (оставляется полностью как у тебя)
+    elif data == "back_start":
+        await show_start(update, context, edit=True)
+
 
 # ============================================================
 # ======================= ОБРАБОТКА ТЕКСТА ===================
@@ -242,7 +268,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("suggest_mode"):
         save_to_excel(update.message.from_user, update.message.text)
         context.user_data["suggest_mode"] = False
-        await update.message.reply_text("Спасибо! Предложение будет учтено ✅")
+        await update.message.reply_text("Спасибо! Предложение сохранено ✅")
         return
 
     if context.user_data.get("ai_mode"):
@@ -250,6 +276,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer = await ask_ai(update.message.from_user.id, update.message.text)
         await update.message.reply_text(answer)
         return
+
 
 # ============================================================
 # ============================ MAIN ==========================
