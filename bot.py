@@ -145,14 +145,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data == "mode_question":
-        keyboard = [
-            [InlineKeyboardButton("⬅ Назад", callback_data="user_student")],
-            [InlineKeyboardButton("🏠 В главное меню", callback_data="back_start")]
-        ]
+    context.user_data["ai_mode"] = True
+    keyboard = [
+        [InlineKeyboardButton("⬅ Назад", callback_data="user_student")],
+        [InlineKeyboardButton("🏠 В главное меню", callback_data="back_start")]
+    ]
         await query.edit_message_text(
-            "Здесь будет режим ИИ.",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        "Напишите ваш вопрос по Еврокодам:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
 
     # ---------------- ВЫБОР ЕВРОКОДА ----------------
 
@@ -272,3 +274,200 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ============================================================
+# ======================= AI МОДУЛЬ ==========================
+# ============================================================
+
+from openai import OpenAI
+import sqlite3
+import numpy as np
+
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+
+ai_client = OpenAI(
+    api_key=OPENAI_KEY,
+    base_url="https://openrouter.ai/api/v1"
+)
+
+DB_FILE = "structai_ai.db"
+
+# -------------------- ИНИЦИАЛИЗАЦИЯ БД --------------------
+
+def init_ai_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            role TEXT
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            question TEXT,
+            answer TEXT,
+            date TEXT
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            content TEXT
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+# -------------------- СОХРАНЕНИЕ РОЛИ --------------------
+
+def save_user_role(user_id, role):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO users (user_id, role) VALUES (?, ?)", (user_id, role))
+    conn.commit()
+    conn.close()
+
+def get_user_role(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT role FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else "engineer"
+
+# -------------------- ДОБАВЛЕНИЕ ДОКУМЕНТОВ --------------------
+
+def add_document(title, content):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO documents (title, content) VALUES (?, ?)", (title, content))
+    conn.commit()
+    conn.close()
+
+def search_documents(query):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT content FROM documents WHERE content LIKE ?", (f"%{query}%",))
+    results = c.fetchall()
+    conn.close()
+    return "\n\n".join([r[0][:2000] for r in results[:3]])
+
+# -------------------- СИСТЕМНЫЙ ПРОМПТ --------------------
+
+def build_system_prompt(role):
+
+    base = """
+Ты инженерный ассистент по Еврокодам EN 1990–1999,
+СП РК EN, НТП РК и национальным приложениям.
+
+Запрещено:
+- философия
+- медицина
+- психология
+- темы вне проектирования
+- выдуманные нормы
+
+Если вопрос вне нормативов:
+ответь: "Вопрос вне области нормативного проектирования."
+"""
+
+    if role == "student":
+        style = "\nОбъясняй максимально просто, пошагово, с примерами."
+    elif role == "engineer":
+        style = "\nОтвечай профессионально и технически."
+    elif role == "oldschool":
+        style = "\nОтвечай технически и при возможности указывай различия со старыми СП."
+    else:
+        style = ""
+
+    return base + style
+
+# -------------------- ЗАПРОС К ИИ --------------------
+
+async def ask_ai(user_id, question):
+
+    role = get_user_role(user_id)
+    system_prompt = build_system_prompt(role)
+
+    docs_context = search_documents(question)
+
+    full_prompt = f"""
+Контекст нормативов:
+{docs_context}
+
+Вопрос:
+{question}
+"""
+
+    response = ai_client.chat.completions.create(
+        model="mistralai/mistral-7b-instruct",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": full_prompt}
+        ],
+        temperature=0.2,
+        max_tokens=900
+    )
+
+    answer = response.choices[0].message.content
+
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO history (user_id, question, answer, date) VALUES (?, ?, ?, ?)",
+        (user_id, question, answer, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    )
+    conn.commit()
+    conn.close()
+
+    return answer
+
+# -------------------- ПЕРЕХВАТ CALLBACK ДЛЯ РОЛИ --------------------
+
+old_handle_callback = handle_callback
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    data = query.data
+
+    if data == "user_student":
+        save_user_role(query.from_user.id, "student")
+
+    elif data == "user_engineer":
+        save_user_role(query.from_user.id, "engineer")
+
+    elif data == "user_oldschool":
+        save_user_role(query.from_user.id, "oldschool")
+
+    await old_handle_callback(update, context)
+
+# -------------------- РАСШИРЕНИЕ handle_message --------------------
+
+old_handle_message = handle_message
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if context.user_data.get("ai_mode"):
+        await update.message.reply_text("Анализ нормативной базы...")
+        answer = await ask_ai(update.message.from_user.id, update.message.text)
+        await update.message.reply_text(answer)
+        return
+
+    await old_handle_message(update, context)
+
+# -------------------- ПЕРЕИНИЦИАЛИЗАЦИЯ MAIN --------------------
+
+old_main = main
+
+def main():
+    init_ai_db()
+    old_main()
